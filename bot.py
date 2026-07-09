@@ -3,7 +3,7 @@ import re
 import asyncio
 import uuid
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, F
+from aiogram.webhook.aiohttp_impl import SimpleRequestHandler
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
