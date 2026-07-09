@@ -3,7 +3,8 @@ import re
 import asyncio
 import uuid
 from dotenv import load_dotenv
-from aiogram.webhook.aiohttp_impl import SimpleRequestHandler
+# To'g'ri shakli:
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
