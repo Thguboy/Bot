@@ -2,78 +2,108 @@ import os
 import re
 import asyncio
 import uuid
+import subprocess
 from dotenv import load_dotenv
-# To'g'ri shakli:
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import CommandStart
-from aiogram.enums import ChatMemberStatus
+from aiogram.filters import CommandStart, Command
+from aiogram.enums import ChatAction
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 import yt_dlp
 
 load_dotenv()
 
-# Telegram Bot Token (.env faylida yoki muhit o'zgaruvchisida)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN topilmadi. .env faylini yoki muhit o'zgaruvchisini sozlang.")
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# PythonAnywhere bepul rejimida Telegram API uchun proxy kerak
+BOT_PROXY = os.getenv("BOT_PROXY")
+if not BOT_PROXY and os.getenv("PYTHONANYWHERE_DOMAIN"):
+    BOT_PROXY = "http://proxy.server:3128"
 
-# Yuklab olinadigan fayllar uchun vaqtinchalik papka
+if BOT_PROXY:
+    bot = Bot(token=BOT_TOKEN, session=AiohttpSession(proxy=BOT_PROXY))
+else:
+    bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
 DOWNLOAD_DIR = "downloads"
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
-# Yuklab olingan fayllarni vaqtincha saqlash (callback uchun)
 downloaded_files = {}
 
-# Rasm kengaytmalari
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp'}
-# Video kengaytmalari
 VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.flv', '.3gp'}
-# Audio kengaytmalari
 AUDIO_EXTENSIONS = {'.mp3', '.m4a', '.ogg', '.wav', '.flac', '.aac', '.opus'}
 
-# Majburiy obuna kanallari
-REQUIRED_CHANNELS = [
-    {"username": "programmerking", "title": "Programmer King", "url": "https://t.me/programmerking"},
-    {"username": "Skromniy_ku_user", "title": "Skromniy_ku_user", "url": "https://t.me/Skromniy_ku_user"},
-    {"username": "Coinsscc", "title": "Coinsscc", "url": "https://t.me/Coinsscc"},
+START_TEXT = (
+    "👋 <b>Assalomu alaykum!</b>\n\n"
+    "Men <b>universal media yuklovchi</b> botman.\n\n"
+    "📌 <b>Nima qila olaman?</b>\n"
+    "• Havola yuborsangiz — <b>video, rasm yoki audio</b> yuklab beraman\n"
+    "• <code>/round</code> — videoni <b>dumaloq video message</b> qilib beraman\n\n"
+    "🌐 <b>Qo'llab-quvvatlanadigan saytlar:</b>\n"
+    "YouTube • Instagram • TikTok • Facebook • Twitter/X va 1000+ sayt\n\n"
+    "📝 <b>Qanday ishlatish:</b>\n"
+    "1️⃣ Media havolasini yuboring\n"
+    "2️⃣ Bot yuklab, sizga yuboradi\n\n"
+    "💡 <i>Masalan:</i> https://youtube.com/watch?v=..."
+)
+
+LOADING_FRAMES = [
+    "⏳ <b>Yuklanmoqda</b>",
+    "🔄 <b>Yuklanmoqda.</b>",
+    "📥 <b>Yuklanmoqda..</b>",
+    "🚀 <b>Yuklanmoqda...</b>",
 ]
 
-SUBSCRIPTION_MESSAGE = (
-    "🔔 Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:\n\n"
-    "Obuna bo'lgach, \"✅ Obunani tekshirish\" tugmasini bosing."
+COOKIE_SITES = ('instagram.com', 'facebook.com', 'fb.watch', 'threads.net')
+VIDEO_SITES = (
+    'youtube.com', 'youtu.be', 'tiktok.com', 'instagram.com',
+    'facebook.com', 'fb.watch', 'twitter.com', 'x.com', 'vk.com', 'threads.net',
 )
 
 
+class RoundStates(StatesGroup):
+    waiting_video = State()
+
+
 def get_media_type(file_path: str) -> str:
-    """Fayl kengaytmasiga qarab media turini aniqlash"""
     ext = os.path.splitext(file_path)[1].lower()
     if ext in IMAGE_EXTENSIONS:
         return "photo"
-    elif ext in VIDEO_EXTENSIONS:
+    if ext in VIDEO_EXTENSIONS:
         return "video"
-    elif ext in AUDIO_EXTENSIONS:
+    if ext in AUDIO_EXTENSIONS:
         return "audio"
-    else:
-        return "document"
-
-
-# Cookie talab qiladigan saytlar (YouTube/TikTok uchun cookie KERAK EMAS)
-COOKIE_SITES = ('instagram.com', 'facebook.com', 'fb.watch', 'threads.net')
+    return "document"
 
 
 def needs_cookies(url: str) -> bool:
-    """Faqat Instagram/Facebook kabi saytlar uchun cookie kerak"""
     url_lower = url.lower()
     return any(site in url_lower for site in COOKIE_SITES)
 
 
+def is_video_site(url: str) -> bool:
+    url_lower = url.lower()
+    return any(site in url_lower for site in VIDEO_SITES)
+
+
+def has_ffmpeg() -> bool:
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        return True
+    except Exception:
+        return False
+
+
 def get_cookies_browser():
-    """Brauzer cookie'larini haqiqatan yuklab ko'rish — Chrome ochiq bo'lsa o'tkazib yuboriladi"""
     from yt_dlp.cookies import extract_cookies_from_browser
 
     for browser in ['edge', 'firefox', 'brave', 'opera', 'chromium', 'chrome']:
@@ -85,14 +115,27 @@ def get_cookies_browser():
     return None
 
 
+def _get_downloaded_filepath(info) -> str | None:
+    requested = info.get('requested_downloads') or []
+    for item in requested:
+        filepath = item.get('filepath')
+        if filepath and os.path.exists(filepath):
+            return filepath
+
+    for key in ('filepath', '_filename'):
+        filepath = info.get(key)
+        if filepath and os.path.exists(filepath):
+            return filepath
+    return None
+
+
 def _resolve_downloaded_file(ydl, info) -> str:
-    """Yuklab olingan fayl yo'lini aniqlash (merge yoki nom o'zgarganda)"""
     filename = ydl.prepare_filename(info)
     if os.path.exists(filename):
         return filename
 
     base, _ = os.path.splitext(filename)
-    for ext in ['.mp4', '.mkv', '.webm', '.mov', '.m4a', '.mp3', '.jpg', '.jpeg', '.png', '.webp']:
+    for ext in ['.mp4', '.mkv', '.webm', '.mov', '.m4a', '.mp3', '.opus', '.jpg', '.jpeg', '.png', '.webp', '.gif']:
         candidate = base + ext
         if os.path.exists(candidate):
             return candidate
@@ -107,7 +150,6 @@ def _resolve_downloaded_file(ydl, info) -> str:
 
 
 def _extract_single_entry(info):
-    """Playlist/carousel bo'lsa birinchi elementni olish"""
     if info and info.get('_type') == 'playlist':
         entries = [e for e in info.get('entries', []) if e is not None]
         if entries:
@@ -115,13 +157,17 @@ def _extract_single_entry(info):
     return info
 
 
-def _build_ytdlp_opts(use_cookies: bool = False, cookies_browser: str = None, video_format: bool = True) -> dict:
-    """yt-dlp sozlamalarini yaratish"""
+def _base_ytdlp_opts(url: str, use_cookies: bool = False, cookies_browser: str = None) -> dict:
     opts = {
         'outtmpl': f'{DOWNLOAD_DIR}/%(id)s.%(ext)s',
         'no_warnings': True,
         'quiet': True,
         'restrictfilenames': True,
+        'noplaylist': True,
+        'extractor_retries': 5,
+        'fragment_retries': 10,
+        'retries': 10,
+        'socket_timeout': 60,
         'http_headers': {
             'User-Agent': (
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -129,187 +175,341 @@ def _build_ytdlp_opts(use_cookies: bool = False, cookies_browser: str = None, vi
                 'Chrome/131.0.0.0 Safari/537.36'
             ),
         },
-        'max_filesize': 50 * 1024 * 1024,
     }
 
-    if video_format:
-        # Telegram uchun mp4 format (bitta fayl, merge kerak emas)
+    url_lower = url.lower()
+    extractor_args = {}
+    if 'youtube.com' in url_lower or 'youtu.be' in url_lower:
+        extractor_args['youtube'] = {'player_client': ['android', 'web']}
+    if 'tiktok.com' in url_lower:
+        extractor_args['tiktok'] = {'api_hostname': 'api22-normal-c-useast1a.tiktokv.com'}
+    if extractor_args:
+        opts['extractor_args'] = extractor_args
+
+    if use_cookies and cookies_browser:
+        opts['cookiesfrombrowser'] = (cookies_browser,)
+    return opts
+
+
+def _build_ytdlp_opts(
+    url: str,
+    mode: str = 'video_single',
+    use_cookies: bool = False,
+    cookies_browser: str = None,
+) -> dict:
+    opts = _base_ytdlp_opts(url, use_cookies, cookies_browser)
+
+    if mode == 'video_single':
         opts['format'] = (
-            'best[ext=mp4][height<=1080]/'
-            'best[ext=mp4]/'
-            'best[height<=1080]/'
+            'b[ext=mp4][height<=1080][filesize<=50M]/'
+            'b[ext=mp4][height<=720][filesize<=50M]/'
+            'b[ext=mp4]/'
+            '22/18/'
+            'b[height<=720]/'
+            'b'
+        )
+    elif mode == 'video_merge':
+        opts['format'] = (
             'bestvideo[ext=mp4]+bestaudio[ext=m4a]/'
             'bestvideo+bestaudio/'
             'best'
         )
         opts['merge_output_format'] = 'mp4'
+    elif mode == 'video_fallback':
+        opts['format'] = 'best[ext=mp4]/best[height<=720]/best'
+    elif mode == 'audio':
+        opts['format'] = 'bestaudio/best'
+        opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
+    elif mode == 'image':
+        opts['format'] = 'best[ext=jpg]/best[ext=jpeg]/best[ext=png]/best[ext=webp]/best'
     else:
         opts['format'] = 'best'
-
-    if use_cookies and cookies_browser:
-        opts['cookiesfrombrowser'] = (cookies_browser,)
 
     return opts
 
 
 def _download_with_opts(url: str, opts: dict) -> dict:
-    """Berilgan sozlamalar bilan yuklab olish"""
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         info = _extract_single_entry(info)
 
         if info is None:
-            raise Exception("Ma'lumot olishda xatolik")
+            raise Exception("Media ma'lumotlari topilmadi")
 
-        filename = _resolve_downloaded_file(ydl, info)
+        filename = _get_downloaded_filepath(info) or _resolve_downloaded_file(ydl, info)
         if not os.path.exists(filename):
             raise yt_dlp.utils.DownloadError(f"Fayl yuklanmadi: {filename}")
 
-        title = info.get('title') or info.get('description', 'Media')[:100]
-        media_type = get_media_type(filename)
-
+        title = info.get('title') or (info.get('description') or 'Media')[:100]
         return {
             'file_path': filename,
             'title': title,
-            'media_type': media_type,
+            'media_type': get_media_type(filename),
         }
 
 
 def download_media(url: str) -> dict:
-    """yt-dlp yordamida media yuklab olish funksiyasi. Turi va yo'lini qaytaradi."""
     attempts = []
+    cookies_browser = get_cookies_browser() if needs_cookies(url) else None
+    cookie_variants = [True, False] if cookies_browser and needs_cookies(url) else [False]
 
-    if needs_cookies(url):
-        cookies_browser = get_cookies_browser()
-        if cookies_browser:
-            attempts.append(_build_ytdlp_opts(use_cookies=True, cookies_browser=cookies_browser))
-        attempts.append(_build_ytdlp_opts(use_cookies=False))
-    else:
-        # YouTube, TikTok va boshqalar — cookiesiz
-        attempts.append(_build_ytdlp_opts(use_cookies=False))
+    video_modes = ['video_single']
+    if has_ffmpeg():
+        video_modes.append('video_merge')
+    video_modes.append('video_fallback')
 
-    # Oxirgi urinish — eng keng format
-    attempts.append(_build_ytdlp_opts(use_cookies=False, video_format=False))
+    for use_cookies in cookie_variants:
+        browser = cookies_browser if use_cookies else None
+        for mode in video_modes:
+            attempts.append(_build_ytdlp_opts(url, mode, use_cookies, browser))
+
+    if not is_video_site(url):
+        for use_cookies in cookie_variants:
+            browser = cookies_browser if use_cookies else None
+            attempts.append(_build_ytdlp_opts(url, 'audio', use_cookies, browser))
+            attempts.append(_build_ytdlp_opts(url, 'image', use_cookies, browser))
 
     last_error = None
+    seen = set()
     for opts in attempts:
+        key = (opts.get('format'), opts.get('cookiesfrombrowser'), str(opts.get('extractor_args')))
+        if key in seen:
+            continue
+        seen.add(key)
         try:
             return _download_with_opts(url, opts)
         except Exception as e:
             last_error = e
             print(f"Yuklab olish urinishi muvaffaqiyatsiz: {e}")
-            continue
 
     if last_error:
         raise last_error
-    raise Exception("Yuklab olishda xatolik")
+    raise Exception("Media yuklab bo'lmadi")
 
 
-def get_subscription_keyboard() -> InlineKeyboardMarkup:
-    """Majburiy obuna kanallari va tekshirish tugmasi"""
-    buttons = [
-        [InlineKeyboardButton(text=f"📢 {ch['title']}", url=ch['url'])]
-        for ch in REQUIRED_CHANNELS
+def ensure_telegram_video(file_path: str) -> str:
+    """Telegram uchun mp4/h264 formatga o'tkazish"""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == '.mp4' or not has_ffmpeg():
+        return file_path
+
+    output_path = f"{os.path.splitext(file_path)[0]}_tg.mp4"
+    subprocess.run([
+        'ffmpeg', '-y', '-i', file_path,
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        '-c:a', 'aac', '-movflags', '+faststart',
+        output_path,
+    ], check=True, capture_output=True)
+    return output_path
+
+
+def convert_to_video_note(input_path: str, output_path: str) -> None:
+    cmd = [
+        'ffmpeg', '-y', '-i', input_path,
+        '-t', '60',
+        '-vf', 'scale=640:640:force_original_aspect_ratio=increase,crop=640:640',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+        '-c:a', 'aac', '-b:a', '128k',
+        '-movflags', '+faststart',
+        output_path,
     ]
-    buttons.append([
-        InlineKeyboardButton(text="✅ Obunani tekshirish", callback_data="check_sub")
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    subprocess.run(cmd, check=True, capture_output=True)
 
 
-async def check_user_subscription(user_id: int) -> tuple[bool, list]:
-    """Foydalanuvchi barcha kanallarga obuna ekanligini tekshirish"""
-    unsubscribed = []
-    for channel in REQUIRED_CHANNELS:
+async def run_loading_animation(chat_id: int, message_id: int, stop_event: asyncio.Event):
+    i = 0
+    while not stop_event.is_set():
         try:
-            member = await bot.get_chat_member(f"@{channel['username']}", user_id)
-            if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
-                unsubscribed.append(channel)
-        except Exception as e:
-            print(f"Obuna tekshirishda xatolik @{channel['username']}: {e}")
-            unsubscribed.append(channel)
-    return len(unsubscribed) == 0, unsubscribed
+            await bot.edit_message_text(
+                LOADING_FRAMES[i % len(LOADING_FRAMES)],
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode='HTML',
+            )
+        except Exception:
+            pass
+        i += 1
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.9)
+            break
+        except asyncio.TimeoutError:
+            continue
 
 
-async def require_subscription(message: Message) -> bool:
-    """Obuna bo'lmagan bo'lsa xabar yuboradi va False qaytaradi"""
-    is_subscribed, _ = await check_user_subscription(message.from_user.id)
-    if not is_subscribed:
-        await message.answer(SUBSCRIPTION_MESSAGE, reply_markup=get_subscription_keyboard())
-        return False
-    return True
+async def run_chat_action(chat_id: int, stop_event: asyncio.Event):
+    actions = [ChatAction.UPLOAD_VIDEO, ChatAction.UPLOAD_PHOTO, ChatAction.UPLOAD_DOCUMENT]
+    i = 0
+    while not stop_event.is_set():
+        try:
+            await bot.send_chat_action(chat_id, actions[i % len(actions)])
+        except Exception:
+            pass
+        i += 1
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=4)
+            break
+        except asyncio.TimeoutError:
+            continue
+
+
+def format_download_error(error: Exception) -> str:
+    msg = str(error).lower()
+    if any(x in msg for x in ('429', 'rate limit', 'too many requests', 'quota')):
+        return "⚠️ API limiti tugagan. Biroz kutib, qayta urinib ko'ring."
+    if any(x in msg for x in ('403', 'forbidden', 'blocked')):
+        return "🔒 Sayt kirishni cheklagan. Boshqa havola yuboring."
+    if 'unsupported url' in msg:
+        return "❌ Bu sayt qo'llab-quvvatlanmaydi."
+    if 'private' in msg or 'login' in msg or 'sign in' in msg:
+        return "🔒 Bu media shaxsiy yoki login talab qiladi."
+    if any(x in msg for x in ('unavailable', 'not available', 'removed', 'deleted')):
+        return "❌ Media topilmadi yoki o'chirilgan."
+    if 'empty media' in msg or 'cookies' in msg:
+        return (
+            "🔒 Bu sayt cookie/login talab qiladi.\n\n"
+            "Instagram/Facebook uchun brauzerda tizimga kiring va qayta urinib ko'ring."
+        )
+    if any(x in msg for x in ('unable to extract', 'no video', 'no formats', 'requested format')):
+        return "❌ Media formati topilmadi. Boshqa havola yuboring."
+    if 'timed out' in msg or 'timeout' in msg:
+        return "⏱️ Vaqt tugadi. Internet sekin — qayta urinib ko'ring."
+    return "❌ Yuklab olishda xatolik. Havolani tekshirib qayta yuboring."
 
 
 def get_media_keyboard(file_id: str) -> InlineKeyboardMarkup:
-    """Yuklab olish va istoriyaga qo'yish tugmalarini yaratish"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📥 Yuklab olish", callback_data=f"dl:{file_id}"),
             InlineKeyboardButton(text="📱 Istoriyaga", callback_data=f"st:{file_id}"),
         ]
     ])
-    return keyboard
 
 
-@dp.callback_query(F.data == "check_sub")
-async def callback_check_subscription(callback: CallbackQuery):
-    """Obunani qayta tekshirish"""
-    is_subscribed, _ = await check_user_subscription(callback.from_user.id)
-    if is_subscribed:
-        await callback.message.edit_text(
-            "✅ Rahmat! Barcha kanallarga obuna bo'lgansiz.\n\n"
-            "👋 Salom! Men universal media yuklovchi botman.\n\n"
-            "🔗 Menga quyidagi saytlardan havola yuboring:\n"
-            "• YouTube\n"
-            "• Instagram\n"
-            "• TikTok\n"
-            "• Facebook\n"
-            "• Twitter/X\n"
-            "• va boshqa 1000+ saytlar\n\n"
-            "📥 Men rasm, video yoki audio bo'lsa — hammasini yuklab beraman!"
+async def send_media_to_user(message: Message, file_path: str, title: str, media_type: str, keyboard):
+    caption = f"✅ <b>{title}</b>\n\n📥 Tugmalar orqali yuklab oling yoki saqlang!"
+    send_path = file_path
+    converted_path = None
+
+    if media_type == "video":
+        try:
+            send_path = ensure_telegram_video(file_path)
+            if send_path != file_path:
+                converted_path = send_path
+        except Exception as conv_err:
+            print(f"Video konvertatsiya xatolik: {conv_err}")
+
+    file_input = FSInputFile(send_path)
+    try:
+        if media_type == "photo":
+            await message.answer_photo(photo=file_input, caption=caption, reply_markup=keyboard, parse_mode='HTML')
+        elif media_type == "video":
+            await message.answer_video(
+                video=file_input, caption=caption, reply_markup=keyboard,
+                supports_streaming=True, parse_mode='HTML',
+            )
+        elif media_type == "audio":
+            await message.answer_audio(audio=file_input, caption=caption, reply_markup=keyboard, parse_mode='HTML')
+        else:
+            await message.answer_document(document=file_input, caption=caption, reply_markup=keyboard, parse_mode='HTML')
+    except Exception as send_err:
+        print(f"Media yuborishda xatolik, hujjat sifatida sinash: {send_err}")
+        await message.answer_document(
+            document=FSInputFile(send_path), caption=caption, reply_markup=keyboard, parse_mode='HTML',
         )
-        await callback.answer("✅ Obuna tasdiqlandi!")
-    else:
-        await callback.answer(
-            "❌ Hali barcha kanallarga obuna bo'lmagansiz!",
-            show_alert=True,
-        )
+    finally:
+        if converted_path and os.path.exists(converted_path):
+            os.remove(converted_path)
+
+
+async def process_round_video(message: Message, tg_file_id: str):
+    status = await message.answer("⏳ <b>Dumaloq video tayyorlanmoqda...</b>", parse_mode='HTML')
+    input_path = os.path.join(DOWNLOAD_DIR, f"round_in_{uuid.uuid4().hex[:8]}.mp4")
+    output_path = os.path.join(DOWNLOAD_DIR, f"round_out_{uuid.uuid4().hex[:8]}.mp4")
+
+    try:
+        tg_file = await bot.get_file(tg_file_id)
+        await bot.download_file(tg_file.file_path, input_path)
+        convert_to_video_note(input_path, output_path)
+
+        if not os.path.exists(output_path):
+            await status.edit_text("❌ Dumaloq video yaratib bo'lmadi.")
+            return
+
+        if os.path.getsize(output_path) > 50 * 1024 * 1024:
+            await status.edit_text("❌ Video juda katta. 60 soniyagacha qisqa video yuboring.")
+            return
+
+        await message.answer_video_note(FSInputFile(output_path))
+        await status.edit_text("✅ <b>Dumaloq video tayyor!</b>", parse_mode='HTML')
+    except FileNotFoundError:
+        await status.edit_text("❌ FFmpeg topilmadi. Serverda ffmpeg o'rnatilgan bo'lishi kerak.")
+    except subprocess.CalledProcessError as e:
+        print(f"FFmpeg xatolik: {e.stderr.decode(errors='ignore') if e.stderr else e}")
+        await status.edit_text("❌ Videoni dumaloq qilishda xatolik. Boshqa video sinab ko'ring.")
+    except Exception as e:
+        print(f"Round video xatolik: {e}")
+        await status.edit_text("❌ Dumaloq video yaratishda xatolik.")
+    finally:
+        for path in (input_path, output_path):
+            if os.path.exists(path):
+                os.remove(path)
 
 
 @dp.message(CommandStart())
 async def start_cmd(message: Message):
-    if not await require_subscription(message):
+    await message.answer(START_TEXT, parse_mode='HTML')
+
+
+@dp.message(Command("round", "raund"))
+async def round_cmd(message: Message, state: FSMContext):
+    reply = message.reply_to_message
+    if reply and reply.video:
+        await process_round_video(message, reply.video.file_id)
+        return
+    if reply and reply.document and reply.document.mime_type and reply.document.mime_type.startswith('video/'):
+        await process_round_video(message, reply.document.file_id)
         return
 
+    await state.set_state(RoundStates.waiting_video)
     await message.answer(
-        "👋 Salom! Men universal media yuklovchi botman.\n\n"
-        "🔗 Menga quyidagi saytlardan havola yuboring:\n"
-        "• YouTube\n"
-        "• Instagram\n"
-        "• TikTok\n"
-        "• Facebook\n"
-        "• Twitter/X\n"
-        "• va boshqa 1000+ saytlar\n\n"
-        "📥 Men rasm, video yoki audio bo'lsa — hammasini yuklab beraman!"
+        "⭕ <b>Dumaloq video yaratish</b>\n\n"
+        "📹 Video yuboring yoki videoga javob qilib <code>/round</code> yozing.\n\n"
+        "💡 Video 60 soniyagacha bo'lishi kerak.",
+        parse_mode='HTML',
     )
+
+
+@dp.message(RoundStates.waiting_video, F.video | F.document)
+async def round_receive_video(message: Message, state: FSMContext):
+    await state.clear()
+    if message.video:
+        await process_round_video(message, message.video.file_id)
+    elif message.document and message.document.mime_type and message.document.mime_type.startswith('video/'):
+        await process_round_video(message, message.document.file_id)
+    else:
+        await message.answer("❌ Iltimos, video fayl yuboring.")
 
 
 @dp.message(F.text.regexp(r'https?://\S+'))
 async def handle_links(message: Message):
-    """Linkdan media yuklab olish va foydalanuvchiga yuborish"""
-    if not await require_subscription(message):
-        return
-
     url_match = re.search(r'https?://\S+', message.text)
     if not url_match:
         await message.answer("❌ Havola topilmadi. Iltimos, to'g'ri havola yuboring.")
         return
 
-    url = url_match.group(0)
-    status_message = await message.answer("⏳ Havola tekshirilmoqda va yuklab olinmoqda...")
+    url = url_match.group(0).rstrip('.,)')
+    status_message = await message.answer(LOADING_FRAMES[0], parse_mode='HTML')
+
+    stop_event = asyncio.Event()
+    anim_task = asyncio.create_task(run_loading_animation(message.chat.id, status_message.message_id, stop_event))
+    action_task = asyncio.create_task(run_chat_action(message.chat.id, stop_event))
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, download_media, url)
 
         file_path = result['file_path']
@@ -320,96 +520,42 @@ async def handle_links(message: Message):
             await status_message.edit_text("❌ Faylni yuklab bo'lmadi. Boshqa havolani sinab ko'ring.")
             return
 
-        # Fayl hajmini tekshirish (Telegram 50MB gacha)
         file_size = os.path.getsize(file_path)
         if file_size > 50 * 1024 * 1024:
             os.remove(file_path)
-            await status_message.edit_text(
-                "❌ Fayl hajmi 50MB dan katta. Telegram bu hajmdagi fayllarni qabul qilmaydi."
-            )
+            await status_message.edit_text("❌ Fayl 50MB dan katta. Telegram qabul qilmaydi.")
             return
 
-        await status_message.edit_text("🚀 Fayl Telegramga yuklanmoqda...")
+        await status_message.edit_text("🚀 <b>Telegramga yuborilmoqda...</b>", parse_mode='HTML')
 
-        # Unique ID yaratish (qisqa)
         file_id = uuid.uuid4().hex[:12]
-
-        # Faylni cache'ga saqlash (callback uchun)
         downloaded_files[file_id] = {
             'file_path': file_path,
             'title': title,
             'media_type': media_type,
         }
 
-        # Inline keyboard tugmalar
-        keyboard = get_media_keyboard(file_id)
-        caption = f"✅ {title}\n\n📥 Tugmalar orqali yuklab oling!"
-        file_input = FSInputFile(file_path)
-
-        try:
-            if media_type == "photo":
-                await message.answer_photo(
-                    photo=file_input, caption=caption,
-                    reply_markup=keyboard
-                )
-            elif media_type == "video":
-                await message.answer_video(
-                    video=file_input, caption=caption,
-                    reply_markup=keyboard,
-                    supports_streaming=True,
-                )
-            elif media_type == "audio":
-                await message.answer_audio(
-                    audio=file_input, caption=caption,
-                    reply_markup=keyboard
-                )
-            else:
-                await message.answer_document(
-                    document=file_input, caption=caption,
-                    reply_markup=keyboard
-                )
-        except Exception as send_err:
-            # Agar media sifatida yuborishda xatolik bo'lsa — hujjat sifatida sinash
-            print(f"Media yuborishda xatolik, hujjat sifatida sinash: {send_err}")
-            file_input2 = FSInputFile(file_path)
-            await message.answer_document(
-                document=file_input2, caption=caption,
-                reply_markup=keyboard
-            )
-
+        await send_media_to_user(message, file_path, title, media_type, get_media_keyboard(file_id))
         await status_message.delete()
 
     except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e).lower()
-        if "unsupported url" in error_msg:
-            await status_message.edit_text("❌ Bu sayt qo'llab-quvvatlanmaydi.")
-        elif "private" in error_msg or "login" in error_msg:
-            await status_message.edit_text("🔒 Bu media shaxsiy. Faqat ochiq havolalar yuklanadi.")
-        elif "unavailable" in error_msg or "not available" in error_msg:
-            await status_message.edit_text("❌ Bu media mavjud emas yoki o'chirilgan.")
-        elif "empty media" in error_msg or "cookies" in error_msg:
-            await status_message.edit_text(
-                "🔒 Bu sayt kirish (login) talab qiladi.\n\n"
-                "Iltimos, kompyuterda Chrome/Edge brauzerda Instagram/Facebook'ga kiring, "
-                "keyin botni qayta ishga tushiring."
-            )
-        else:
-            await status_message.edit_text("❌ Yuklab olishda xatolik. Havolani tekshirib qayta yuboring.")
+        await status_message.edit_text(format_download_error(e))
         print(f"yt-dlp xatolik: {e}")
-
     except Exception as e:
         print(f"Umumiy xatolik: {e}")
         try:
-            await status_message.edit_text("❌ Kutilmagan xatolik. Havolani tekshirib qayta yuboring.")
+            await status_message.edit_text(format_download_error(e))
         except Exception:
             pass
+    finally:
+        stop_event.set()
+        anim_task.cancel()
+        action_task.cancel()
 
 
 @dp.callback_query(F.data.startswith("dl:"))
 async def callback_download(callback: CallbackQuery):
-    """Yuklab olish tugmasi — faylni hujjat sifatida yuborish"""
     file_id = callback.data.split(":", 1)[1]
-
     if file_id not in downloaded_files:
         await callback.answer("⚠️ Fayl topilmadi. Havolani qayta yuboring.", show_alert=True)
         return
@@ -424,14 +570,12 @@ async def callback_download(callback: CallbackQuery):
         return
 
     await callback.answer("📥 Yuklab olinmoqda...")
-
     try:
         ext = file_path.split('.')[-1]
-        safe_title = re.sub(r'[^\w\s-]', '', title)[:50].strip()
-        file_input = FSInputFile(file_path, filename=f"{safe_title}.{ext}")
+        safe_title = re.sub(r'[^\w\s-]', '', title)[:50].strip() or 'media'
         await callback.message.answer_document(
-            document=file_input,
-            caption=f"📥 {title}\n\nHujjat sifatida yuklandi ✅"
+            document=FSInputFile(file_path, filename=f"{safe_title}.{ext}"),
+            caption=f"📥 {title}\n\nHujjat sifatida yuklandi ✅",
         )
     except Exception as e:
         print(f"Download callback xatolik: {e}")
@@ -440,9 +584,7 @@ async def callback_download(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("st:"))
 async def callback_story(callback: CallbackQuery):
-    """Istoriyaga qo'yish — media qayta yuborish"""
     file_id = callback.data.split(":", 1)[1]
-
     if file_id not in downloaded_files:
         await callback.answer("⚠️ Fayl topilmadi. Havolani qayta yuboring.", show_alert=True)
         return
@@ -457,11 +599,9 @@ async def callback_story(callback: CallbackQuery):
         return
 
     await callback.answer("📱 Istoriya uchun tayyorlanmoqda...")
-
     try:
         file_input = FSInputFile(file_path)
-        story_text = "📱 Shu mediani Telegram istoriyangizga qo'ying!\n\n👆 Bosib → \"Post to Stories\" ni tanlang"
-
+        story_text = '📱 Shu mediani Telegram istoriyangizga qo\'ying!\n\n👆 Bosib → "Post to Stories" ni tanlang'
         if media_type == "video":
             await callback.message.answer_video(video=file_input, caption=story_text)
         elif media_type == "photo":
@@ -477,14 +617,12 @@ async def callback_story(callback: CallbackQuery):
 
 @dp.message()
 async def handle_other(message: Message):
-    """Boshqa xabarlar uchun javob"""
-    if not await require_subscription(message):
-        return
-
     if message.text:
         await message.answer(
-            "🔗 Iltimos, menga media yuklab olish uchun havola (link) yuboring.\n\n"
-            "Masalan: https://www.youtube.com/watch?v=..."
+            "🔗 Media yuklash uchun havola yuboring.\n\n"
+            "⭕ Dumaloq video uchun: <code>/round</code>\n\n"
+            "💡 Masalan: https://youtube.com/watch?v=...",
+            parse_mode='HTML',
         )
 
 
